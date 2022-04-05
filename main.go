@@ -11,10 +11,10 @@ import (
 	"fmt"
 	"context"
 	"path/filepath"
-	"path"
 
 	"gitlab.com/ruangguru/kennykarnama/video-color-palette-client/client/colorpalette"
 	sharedS3Lib "gitlab.com/ruangguru/kennykarnama/video-color-palette-client/shared/s3"
+	"github.com/gammazero/workerpool"
 )
 
 var args struct {
@@ -45,7 +45,7 @@ func (vv *VideoVersion) GetS3URL() string {
 	return fmt.Sprintf("https://%s.s3.ap-southeast-1.amazonaws.com/%s", args.InputBucket, sharedS3Lib.KeyEscape(vv.OriginalFilePath))
 }
 
-func GetDestinationURI(vv *VideoVersion, csvOutfile string) string {
+func GetDestinationURI(vv VideoVersion, csvOutfile string) string {
 	// Format URL S3:
 	// https://[bucket].s3.ap-southeast-1.amazonaws.com/[key]
 	prefix := args.OutputPrefix
@@ -86,7 +86,38 @@ func main() {
 	var skippedResults []*SkippedResult
 	var successResults []*SuccessResult
 
-	for _, vv := range videoVersions  {
+
+	// open file
+
+	successFile, err := os.OpenFile(args.ResultCmd.SuccessFile, os.O_APPEND|os.O_WRONLY|os.O_CREATE, 0600)
+	if err != nil {
+		log.Fatalf("action=run.openSuccessCsv err=%v", err)
+	}
+	defer successFile.Close()
+
+	skippedFile, err := os.OpenFile(args.ResultCmd.SkippedFile, os.O_APPEND|os.O_WRONLY|os.O_CREATE, 0600)
+	if err != nil {
+		log.Fatalf("action=run.openSkippedCsv err=%v", err)
+	}
+	defer skippedFile.Close()
+
+	errorFile, err := os.OpenFile(args.ResultCmd.ErrorFile, os.O_APPEND|os.O_WRONLY|os.O_CREATE, 0600)
+	if err != nil {
+		log.Fatalf("action=run.openErrorCsv err=%v", err)
+	}
+	defer errorFile.Close()
+
+	if args.ResultCmd != nil {
+		writeReportToFile(args.ResultCmd.SuccessFile, args.ResultCmd.SkippedFile, args.ResultCmd.ErrorFile, successResults, skippedResults, errorResults)
+	}
+
+	wp := workerpool.New(20)
+
+	for _, videoVersion := range videoVersions  {
+
+		vv := *videoVersion
+
+		wp.Submit(func(){
 		paletteReq := colorpalette.ColorPaletteGenerationRequest{
 			SourceURL: vv.GetS3URL(),
 			SourceSerial: vv.Serial,
@@ -95,41 +126,58 @@ func main() {
 			FunctionType: 1,
 			DestinationURI: GetDestinationURI(vv, fmt.Sprintf("%v.csv", vv.Serial)),
 		}
-		log.Printf("Processing vv.serial=%v vv.original_file_path=%v", vv.Serial, vv.OriginalFilePath)
-		exist, err := sharedS3Lib.CheckKeyExist(context.Background(), args.InputBucket, vv.OriginalFilePath)
-		if err != nil {
-			log.Printf("error: %v", err)
-			errorResults = append(errorResults, &ErrorResult{
-				ColorPaletteGenerationRequest: paletteReq,
-				ErrorMessage: err.Error(),
-			})
-			continue
-		}
-		if !exist {
-			log.Printf("Skipped cause file not exist")
-			skippedResults = append(skippedResults, &SkippedResult{
-				VideoVersion: *vv,
-			})
-			continue
-		}
-		if !args.DryRun {
-			err = colorPaletteClient.GenerateColorPalette(context.Background(), paletteReq)
+			log.Printf("Processing vv.serial=%v vv.original_file_path=%v", vv.Serial, vv.OriginalFilePath)
+			exist, err := sharedS3Lib.CheckKeyExist(context.Background(), args.InputBucket, vv.OriginalFilePath)
 			if err != nil {
 				log.Printf("error: %v", err)
-				errorResults = append(errorResults, &ErrorResult{
+				errorResult := &ErrorResult{
 					ColorPaletteGenerationRequest: paletteReq,
 					ErrorMessage: err.Error(),
-				})
-				continue
+				}
+				err = gocsv.MarshalFile([]*ErrorResult{errorResult}, errorFile)
+				if err != nil {
+					log.Fatalf("write.errorFileCsv err=%v", err)
+				}
+				return
 			}
-		}
-		successResults = append(successResults, &SuccessResult{
-			paletteReq,
+			if !exist {
+				log.Printf("Skipped cause file not exist")
+				skippedResult := &SkippedResult{
+					VideoVersion: vv,
+				}
+				err = gocsv.MarshalFile([]*SkippedResult{skippedResult}, skippedFile)
+				if err != nil {
+					log.Fatalf("write.skippedFileFileCsv err=%v", err)
+				}
+				return
+			}
+			if !args.DryRun {
+				err = colorPaletteClient.GenerateColorPalette(context.Background(), paletteReq)
+				if err != nil {
+					log.Printf("error: %v", err)
+					errorResult := &ErrorResult{
+						ColorPaletteGenerationRequest: paletteReq,
+						ErrorMessage: err.Error(),
+					}
+					err = gocsv.MarshalFile([]*ErrorResult{errorResult}, errorFile)
+					if err != nil {
+						log.Fatalf("write.errorFileCsv err=%v", err)
+					}
+					return
+				}
+			}
+
+			successResult := &SuccessResult{
+				paletteReq,
+			}
+			err = gocsv.MarshalFile([]*SuccessResult{successResult}, successFile)
+			if err != nil {
+				log.Fatalf("write.successFileCsv err=%v", err)
+			}
+
 		})
 	}
-	if args.ResultCmd != nil {
-		writeReportToFile(args.ResultCmd.SuccessFile, args.ResultCmd.SkippedFile, args.ResultCmd.ErrorFile, successResults, skippedResults, errorResults)
-	}
+	wp.StopWait()
 }
 
 
