@@ -25,6 +25,8 @@ var args struct {
 	OutputBucket string     `arg:"required,--output-bucket" help:"output bucket for results"`
 	OutputPrefix string     `arg:"--output-prefix" help:"output prefix" default:"video-color-palette-extraction"`
 	ResultCmd    *ResultCmd `arg:"subcommand:save-result" help:"save result"`
+	SkipIfExist  bool       `arg:"--skip-if-exist" help:"skip if exist"`
+	NumWorker    int         `arg:"--num-worker,-n" help:"num of worker" default:"20"`
 	DryRun       bool       `arg:"--dry-run" help:"dry run"`
 }
 
@@ -60,6 +62,7 @@ type SuccessResult struct {
 
 type SkippedResult struct {
 	VideoVersion
+	Reason string `csv:"reason"`
 }
 
 type ErrorResult struct {
@@ -111,7 +114,7 @@ func main() {
 		writeReportToFile(args.ResultCmd.SuccessFile, args.ResultCmd.SkippedFile, args.ResultCmd.ErrorFile, successResults, skippedResults, errorResults)
 	}
 
-	wp := workerpool.New(20)
+	wp := workerpool.New(args.NumWorker)
 
 	for _, videoVersion := range videoVersions  {
 
@@ -127,6 +130,48 @@ func main() {
 			DestinationURI: GetDestinationURI(vv, fmt.Sprintf("%v.csv", vv.Serial)),
 		}
 			log.Printf("Processing vv.serial=%v vv.original_file_path=%v", vv.Serial, vv.OriginalFilePath)
+			
+			if args.SkipIfExist {
+			// check if csv is already exist in s3
+				destinationObj, err := sharedS3Lib.ParseURL(paletteReq.DestinationURI)
+				if err != nil {
+					log.Printf("error: %v", err)
+					errorResult := &ErrorResult{
+						ColorPaletteGenerationRequest: paletteReq,
+						ErrorMessage: err.Error(),
+					}
+					err = gocsv.MarshalWithoutHeaders([]*ErrorResult{errorResult}, errorFile)
+					if err != nil {
+						log.Fatalf("write.errorFileCsv err=%v", err)
+					}
+					return
+				}
+				csvExist, err := sharedS3Lib.CheckKeyExist(context.Background(), destinationObj.Bucket, destinationObj.Key)
+				if err != nil {
+					log.Printf("error: %v", err)
+					errorResult := &ErrorResult{
+						ColorPaletteGenerationRequest: paletteReq,
+						ErrorMessage: err.Error(),
+					}
+					err = gocsv.MarshalWithoutHeaders([]*ErrorResult{errorResult}, errorFile)
+					if err != nil {
+						log.Fatalf("write.errorFileCsv err=%v", err)
+					}
+					return
+				}
+				if csvExist {
+					log.Printf("Skipped cause csvFile already exist exist")
+					skippedResult := &SkippedResult{
+						VideoVersion: vv,
+						Reason: "result already exist in destinationURI",
+					}
+					err = gocsv.MarshalWithoutHeaders([]*SkippedResult{skippedResult}, skippedFile)
+					if err != nil {
+						log.Fatalf("write.skippedFileFileCsv err=%v", err)
+					}
+					return
+				}
+			}
 			exist, err := sharedS3Lib.CheckKeyExist(context.Background(), args.InputBucket, vv.OriginalFilePath)
 			if err != nil {
 				log.Printf("error: %v", err)
@@ -134,7 +179,7 @@ func main() {
 					ColorPaletteGenerationRequest: paletteReq,
 					ErrorMessage: err.Error(),
 				}
-				err = gocsv.MarshalFile([]*ErrorResult{errorResult}, errorFile)
+				err = gocsv.MarshalWithoutHeaders([]*ErrorResult{errorResult}, errorFile)
 				if err != nil {
 					log.Fatalf("write.errorFileCsv err=%v", err)
 				}
@@ -144,8 +189,9 @@ func main() {
 				log.Printf("Skipped cause file not exist")
 				skippedResult := &SkippedResult{
 					VideoVersion: vv,
+					Reason: "InputVideo doesn't exist in sourceURL",
 				}
-				err = gocsv.MarshalFile([]*SkippedResult{skippedResult}, skippedFile)
+				err = gocsv.MarshalWithoutHeaders([]*SkippedResult{skippedResult}, skippedFile)
 				if err != nil {
 					log.Fatalf("write.skippedFileFileCsv err=%v", err)
 				}
@@ -159,7 +205,7 @@ func main() {
 						ColorPaletteGenerationRequest: paletteReq,
 						ErrorMessage: err.Error(),
 					}
-					err = gocsv.MarshalFile([]*ErrorResult{errorResult}, errorFile)
+					err = gocsv.MarshalWithoutHeaders([]*ErrorResult{errorResult}, errorFile)
 					if err != nil {
 						log.Fatalf("write.errorFileCsv err=%v", err)
 					}
@@ -170,7 +216,7 @@ func main() {
 			successResult := &SuccessResult{
 				paletteReq,
 			}
-			err = gocsv.MarshalFile([]*SuccessResult{successResult}, successFile)
+			err = gocsv.MarshalWithoutHeaders([]*SuccessResult{successResult}, successFile)
 			if err != nil {
 				log.Fatalf("write.successFileCsv err=%v", err)
 			}

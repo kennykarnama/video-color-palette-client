@@ -9,7 +9,6 @@ import (
 	"net/http"
 	"io/ioutil"
 	"errors"
-
 )
 
 type httpClient struct {
@@ -36,7 +35,7 @@ func (s *httpClient) GenerateColorPalette(ctx context.Context, req ColorPaletteG
 	targetURL := fmt.Sprintf("%s%s", s.baseURL, GenerateColorPaletteEndpoint)
 	log.Printf("httpClient.GenerateColorPalette target_url=%v", targetURL)
 	log.Printf("payload=%v", req.String())
-	httpReq, err := s.slingLib.Set("x-api-key", s.apiKey).Post(targetURL).BodyJSON(req).Request()
+	httpReq, err := sling.New().Set("x-api-key", s.apiKey).Post(targetURL).BodyJSON(req).Request()
 	if err != nil {
 		return fmt.Errorf("httpClient.GenerateColorPalette target=%v err=%v", targetURL, err)
 	}
